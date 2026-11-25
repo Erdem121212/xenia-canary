@@ -626,25 +626,26 @@ X_STATUS Emulator::MountDiscPath(const std::filesystem::path& path) {
     return X_STATUS_NO_SUCH_FILE;
   }
   constexpr std::string_view kCdromMountPath = "\\Device\\Cdrom0";
-  std::unique_ptr<vfs::Device> device;
+  auto mount_dev = [&](auto dev) -> X_STATUS {
+    if (!dev || !dev->Initialize()) {
+      XELOGE("Unable to mount disc path {}", path);
+      return X_STATUS_NO_SUCH_FILE;
+    }
+    file_system_->UnregisterDevice(kCdromMountPath);
+    if (!file_system_->RegisterDevice(std::move(dev))) {
+      XELOGE("Unable to register disc device at {}", kCdromMountPath);
+      return X_STATUS_NO_SUCH_FILE;
+    }
+    file_system_->UnregisterSymbolicLink("odd:");
+    file_system_->RegisterSymbolicLink("odd:", std::string(kCdromMountPath));
+    return X_STATUS_SUCCESS;
+  };
   if (std::filesystem::is_directory(path)) {
-    device = std::make_unique<vfs::HostPathDevice>(
-        std::string(kCdromMountPath), path, !cvars::allow_game_relative_writes);
-  } else {
-    device = CreateVfsDevice(path, kCdromMountPath);
+    return mount_dev(std::make_unique<vfs::HostPathDevice>(
+        std::string(kCdromMountPath), path,
+        !cvars::allow_game_relative_writes));
   }
-  if (!device || !device->Initialize()) {
-    XELOGE("Unable to mount disc path {}", path);
-    return X_STATUS_NO_SUCH_FILE;
-  }
-  file_system_->UnregisterDevice(kCdromMountPath);
-  if (!file_system_->RegisterDevice(std::move(device))) {
-    XELOGE("Unable to register disc device at {}", kCdromMountPath);
-    return X_STATUS_NO_SUCH_FILE;
-  }
-  file_system_->UnregisterSymbolicLink("odd:");
-  file_system_->RegisterSymbolicLink("odd:", std::string(kCdromMountPath));
-  return X_STATUS_SUCCESS;
+  return mount_dev(CreateVfsDevice(path, kCdromMountPath));
 }
 
 X_STATUS Emulator::LaunchXexAsDisc(const std::filesystem::path& path) {
