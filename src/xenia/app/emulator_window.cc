@@ -155,6 +155,11 @@ DEFINE_bool(disable_doubleclick_fullscreen, false,
             "causes Xenia to enter fullscreen mode.",
             "General");
 
+DECLARE_string(dashboard_path);
+DECLARE_string(disc_path);
+DECLARE_string(hdd_root);
+DECLARE_bool(mount_hdd);
+
 namespace xe {
 namespace app {
 
@@ -791,7 +796,23 @@ bool EmulatorWindow::Initialize() {
     file_menu->AddChild(
         MenuItem::Create(MenuItem::Type::kString, "&Open...", "Ctrl+O",
                          std::bind(&EmulatorWindow::FileOpen, this)));
+    file_menu->AddChild(
+        MenuItem::Create(MenuItem::Type::kString, "Open XEX as Dis&c...", "",
+                         std::bind(&EmulatorWindow::OpenAsDisc, this)));
+    file_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "Mount &Disc XEX (for Dashboard)...", "",
+        std::bind(&EmulatorWindow::MountDiscForDashboard, this)));
     file_menu->AddChild(std::move(recent_menu));
+    file_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
+    file_menu->AddChild(
+        MenuItem::Create(MenuItem::Type::kString, "&Launch Dashboard", "",
+                         std::bind(&EmulatorWindow::LaunchDashboard, this)));
+    file_menu->AddChild(
+        MenuItem::Create(MenuItem::Type::kString, "Set &Dashboard XEX...", "",
+                         std::bind(&EmulatorWindow::SetDashboardPath, this)));
+    file_menu->AddChild(
+        MenuItem::Create(MenuItem::Type::kString, "Set &HDD Directory...", "",
+                         std::bind(&EmulatorWindow::SetHddDirectory, this)));
     file_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
     zar_menu->AddChild(
         MenuItem::Create(MenuItem::Type::kString, "Create",
@@ -1322,6 +1343,138 @@ void EmulatorWindow::FileOpen() {
 }
 
 void EmulatorWindow::FileClose() { emulator_->TerminateTitle(); }
+
+void EmulatorWindow::LaunchDashboard() {
+  if (cvars::dashboard_path.empty()) {
+    SetDashboardPath();
+    if (cvars::dashboard_path.empty()) {
+      return;
+    }
+  }
+  if (emulator_->is_title_open()) {
+    emulator_->TerminateTitle();
+  }
+  auto result = emulator_->LaunchDashboard();
+  disable_hotkeys_ = false;
+  ClearDialogs();
+  if (result) {
+    XELOGE("Failed to launch dashboard: {:08X}", result);
+    xe::ui::ImGuiDialog::ShowMessageBox(
+        imgui_drawer_.get(), "Dashboard Launch Failed!",
+        "Failed to launch dashboard XEX.\n\nCheck xenia.log for details.");
+  }
+}
+
+void EmulatorWindow::SetDashboardPath() {
+  auto file_picker = xe::ui::FilePicker::Create();
+  file_picker->set_mode(ui::FilePicker::Mode::kOpen);
+  file_picker->set_type(ui::FilePicker::Type::kFile);
+  file_picker->set_multi_selection(false);
+  file_picker->set_title("Select Dashboard XEX");
+  file_picker->set_extensions({
+      {"Xbox Executable (*.xex)", "*.xex"},
+      {"All Files (*.*)", "*.*"},
+  });
+  if (file_picker->Show(window_.get())) {
+    auto selected_files = file_picker->selected_files();
+    if (!selected_files.empty()) {
+      cvars::dashboard_path =
+          xe::path_to_utf8(std::filesystem::absolute(selected_files[0]));
+      config::SaveConfig();
+    }
+  }
+}
+
+void EmulatorWindow::OpenAsDisc() {
+  auto file_picker = xe::ui::FilePicker::Create();
+  file_picker->set_mode(ui::FilePicker::Mode::kOpen);
+  file_picker->set_type(ui::FilePicker::Type::kFile);
+  file_picker->set_multi_selection(false);
+  file_picker->set_title("Select XEX / Disc to Launch as Optical Disc");
+  file_picker->set_extensions({
+      {"Supported Files", "*.xex;*.iso;*.zar;*.*"},
+      {"Xbox Executable (*.xex)", "*.xex"},
+      {"Disc Image (*.iso)", "*.iso"},
+      {"Disc Archive (*.zar)", "*.zar"},
+      {"All Files (*.*)", "*.*"},
+  });
+  if (file_picker->Show(window_.get())) {
+    auto selected_files = file_picker->selected_files();
+    if (selected_files.empty()) {
+      return;
+    }
+    auto abs_path = std::filesystem::absolute(selected_files[0]);
+    if (emulator_->is_title_open()) {
+      emulator_->TerminateTitle();
+    }
+    X_STATUS result = X_STATUS_UNSUCCESSFUL;
+    auto sig = emulator_->GetFileSignature(abs_path);
+    if (sig == Emulator::FileSignatureType::XISO ||
+        sig == Emulator::FileSignatureType::ZAR) {
+      result = emulator_->LaunchPath(abs_path);
+    } else {
+      result = emulator_->LaunchXexAsDisc(abs_path);
+    }
+    disable_hotkeys_ = false;
+    ClearDialogs();
+    if (result) {
+      XELOGE("Failed to launch target as disc: {:08X}", result);
+      xe::ui::ImGuiDialog::ShowMessageBox(
+          imgui_drawer_.get(), "Disc Launch Failed!",
+          "Failed to launch selected XEX as optical disc.\n\nCheck xenia.log "
+          "for details.");
+    } else {
+      AddRecentlyLaunchedTitle(abs_path, emulator_->title_name());
+    }
+  }
+}
+
+void EmulatorWindow::MountDiscForDashboard() {
+  auto file_picker = xe::ui::FilePicker::Create();
+  file_picker->set_mode(ui::FilePicker::Mode::kOpen);
+  file_picker->set_type(ui::FilePicker::Type::kFile);
+  file_picker->set_multi_selection(false);
+  file_picker->set_title("Select Disc XEX / Image for Dashboard");
+  file_picker->set_extensions({
+      {"Supported Files", "*.xex;*.iso;*.zar;*.*"},
+      {"Xbox Executable (*.xex)", "*.xex"},
+      {"Disc Image (*.iso)", "*.iso"},
+      {"Disc Archive (*.zar)", "*.zar"},
+      {"All Files (*.*)", "*.*"},
+  });
+  if (file_picker->Show(window_.get())) {
+    auto selected_files = file_picker->selected_files();
+    if (selected_files.empty()) {
+      return;
+    }
+    auto abs_path = std::filesystem::absolute(selected_files[0]);
+    cvars::disc_path = xe::path_to_utf8(abs_path);
+    config::SaveConfig();
+    if (emulator_->MountDiscPath(abs_path) != X_STATUS_SUCCESS) {
+      xe::ui::ImGuiDialog::ShowMessageBox(
+          imgui_drawer_.get(), "Disc Mount Failed!",
+          "Failed to mount selected disc path at \\Device\\Cdrom0.");
+    }
+  }
+}
+
+void EmulatorWindow::SetHddDirectory() {
+  auto file_picker = xe::ui::FilePicker::Create();
+  file_picker->set_mode(ui::FilePicker::Mode::kOpen);
+  file_picker->set_type(ui::FilePicker::Type::kDirectory);
+  file_picker->set_multi_selection(false);
+  file_picker->set_title("Select Persistent HDD Directory");
+  if (file_picker->Show(window_.get())) {
+    auto selected_files = file_picker->selected_files();
+    if (!selected_files.empty()) {
+      cvars::hdd_root =
+          xe::path_to_utf8(std::filesystem::absolute(selected_files[0]));
+      cvars::mount_hdd = true;
+      config::SaveConfig();
+      emulator_->MountHdd();
+    }
+  }
+}
 
 void EmulatorWindow::InstallContent() {
   std::vector<std::filesystem::path> paths;
@@ -1940,6 +2093,10 @@ const std::map<int, EmulatorWindow::ControllerHotKey> controller_hotkey_map = {
      EmulatorWindow::ControllerHotKey(
          EmulatorWindow::ButtonFunctions::CpuTimeScalarReset,
          "D-PAD Right + Guide = Reset CPU Scalar")},
+    {X_INPUT_GAMEPAD_GUIDE,
+     EmulatorWindow::ControllerHotKey(
+         EmulatorWindow::ButtonFunctions::ReturnToDashboard,
+         "Guide = Return to Dashboard", true)},
 
     // non-pass through hotkeys
     {X_INPUT_GAMEPAD_Y, EmulatorWindow::ControllerHotKey(
@@ -2109,6 +2266,15 @@ EmulatorWindow::ControllerHotKey EmulatorWindow::ProcessControllerHotkey(
 
       LogLevel level = static_cast<LogLevel>(logging::internal::GetLogLevel());
       notificationDesc = level == LogLevel::Disabled ? "Disabled" : "Enabled";
+    } break;
+    case ButtonFunctions::ReturnToDashboard: {
+      if (!cvars::dashboard_path.empty() && emulator_->is_title_open()) {
+        app_context().CallInUIThread([this]() {
+          emulator_->TerminateTitle();
+          LaunchDashboard();
+        });
+      }
+      xe::threading::Sleep(delay);
     } break;
     case ButtonFunctions::Unknown:
     default:

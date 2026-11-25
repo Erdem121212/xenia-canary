@@ -119,6 +119,7 @@ DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
             "Storage");
 
 DECLARE_bool(force_mount_devkit);
+DECLARE_string(disc_path);
 
 DEFINE_transient_path(target, "",
                       "Specifies the target .xex or .iso to execute.",
@@ -666,6 +667,11 @@ void EmulatorApp::EmulatorThread() {
         fs->RegisterSymbolicLink("cache:", "\\CACHE");
       }
     }
+  }
+
+  emulator_->MountHdd();
+  if (!cvars::disc_path.empty()) {
+    emulator_->MountDiscPath(xe::to_path(cvars::disc_path));
   }
 
   if (cvars::force_mount_devkit) {

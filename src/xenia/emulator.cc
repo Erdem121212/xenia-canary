@@ -95,6 +95,31 @@ DEFINE_int32(priority_class, 0,
              "values: 0 - Normal, 1 - Above normal, 2 - High",
              "General");
 
+DEFINE_bool(
+    mount_hdd, true,
+    "Enable persistent host HDD mount at \\Device\\Harddisk0\\Partition1.",
+    "Storage");
+
+DEFINE_string(
+    hdd_root, "",
+    "Custom host directory for HDD (\\Device\\Harddisk0\\Partition1). "
+    "Defaults to <storage_root>/hdd.",
+    "Storage");
+
+DEFINE_string(dashboard_path, "",
+              "Path to a separate Dashboard XEX file (e.g. dash.xex).",
+              "General");
+
+DEFINE_string(disc_path, "",
+              "Path to a separate Disc XEX, folder, or image to mount at "
+              "\\Device\\Cdrom0.",
+              "General");
+
+DEFINE_bool(launch_xex_as_disc, false,
+            "Mount standalone .xex files as optical disc (\\Device\\Cdrom0) "
+            "instead of HDD.",
+            "General");
+
 DECLARE_int32(console_type);
 
 namespace xe {
@@ -462,6 +487,7 @@ X_STATUS Emulator::MountPath(const std::filesystem::path& path,
 
   const std::string mpath = std::string(device->mount_path());
 
+  file_system_->UnregisterDevice(mpath);
   if (!file_system_->RegisterDevice(std::move(device))) {
     XELOGE("Unable to register the input file to {}.", mount_path);
     return X_STATUS_NO_SUCH_FILE;
@@ -562,8 +588,109 @@ Emulator::FileSignatureType Emulator::GetFileSignature(
   return FileSignatureType::Unknown;
 }
 
+std::filesystem::path Emulator::hdd_root() const {
+  if (!cvars::hdd_root.empty()) {
+    return xe::to_path(cvars::hdd_root);
+  }
+  return storage_root_ / "hdd";
+}
+
+bool Emulator::MountHdd() {
+  if (!cvars::mount_hdd || !file_system_) {
+    return false;
+  }
+  const auto hdd_path = hdd_root();
+  std::error_code ec;
+  if (!std::filesystem::exists(hdd_path, ec)) {
+    std::filesystem::create_directories(hdd_path, ec);
+  }
+  constexpr std::string_view kHddMountPath = "\\Device\\Harddisk0\\Partition1";
+  file_system_->UnregisterDevice(kHddMountPath);
+  auto hdd_device = std::make_unique<vfs::HostPathDevice>(
+      std::string(kHddMountPath), hdd_path, false);
+  if (!hdd_device->Initialize()) {
+    XELOGE("Unable to scan HDD path {}", hdd_path);
+    return false;
+  }
+  if (!file_system_->RegisterDevice(std::move(hdd_device))) {
+    XELOGE("Unable to register HDD path {}", hdd_path);
+    return false;
+  }
+  file_system_->UnregisterSymbolicLink("hdd:");
+  file_system_->RegisterSymbolicLink("hdd:", std::string(kHddMountPath));
+  return true;
+}
+
+X_STATUS Emulator::MountDiscPath(const std::filesystem::path& path) {
+  if (path.empty() || !std::filesystem::exists(path)) {
+    return X_STATUS_NO_SUCH_FILE;
+  }
+  constexpr std::string_view kCdromMountPath = "\\Device\\Cdrom0";
+  std::unique_ptr<vfs::Device> device;
+  if (std::filesystem::is_directory(path)) {
+    device = std::make_unique<vfs::HostPathDevice>(
+        std::string(kCdromMountPath), path, !cvars::allow_game_relative_writes);
+  } else {
+    device = CreateVfsDevice(path, kCdromMountPath);
+  }
+  if (!device || !device->Initialize()) {
+    XELOGE("Unable to mount disc path {}", path);
+    return X_STATUS_NO_SUCH_FILE;
+  }
+  file_system_->UnregisterDevice(kCdromMountPath);
+  if (!file_system_->RegisterDevice(std::move(device))) {
+    XELOGE("Unable to register disc device at {}", kCdromMountPath);
+    return X_STATUS_NO_SUCH_FILE;
+  }
+  file_system_->UnregisterSymbolicLink("odd:");
+  file_system_->RegisterSymbolicLink("odd:", std::string(kCdromMountPath));
+  return X_STATUS_SUCCESS;
+}
+
+X_STATUS Emulator::LaunchXexAsDisc(const std::filesystem::path& path) {
+  MountHdd();
+  X_STATUS mount_result = MountPath(path, "\\Device\\Cdrom0");
+  if (mount_result) {
+    return mount_result;
+  }
+  file_system_->UnregisterSymbolicLink("odd:");
+  file_system_->RegisterSymbolicLink("odd:", "\\Device\\Cdrom0");
+
+  auto file_name = path.filename();
+  auto fs_path = fmt::format("{}\\", kDefaultGameSymbolicLink) +
+                 xe::path_to_utf8(file_name);
+  X_STATUS result = CompleteLaunch(path, fs_path);
+  if (XSUCCEEDED(result)) {
+    kernel_state_->deployment_type_ = XDeploymentType::kOpticalDisc;
+  }
+  return result;
+}
+
+X_STATUS Emulator::LaunchDashboard() {
+  if (cvars::dashboard_path.empty()) {
+    return X_STATUS_NOT_FOUND;
+  }
+  const auto dash_path =
+      std::filesystem::absolute(xe::to_path(cvars::dashboard_path));
+  if (!std::filesystem::exists(dash_path)) {
+    XELOGE("Dashboard XEX not found: {}", dash_path);
+    return X_STATUS_NOT_FOUND;
+  }
+  MountHdd();
+  if (!cvars::disc_path.empty()) {
+    MountDiscPath(xe::to_path(cvars::disc_path));
+  }
+  X_STATUS mount_result = MountPath(dash_path, "\\Device\\Dashboard");
+  if (mount_result) {
+    return mount_result;
+  }
+  return LaunchXexFile(dash_path);
+}
+
 X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
   X_STATUS mount_result = X_STATUS_SUCCESS;
+
+  MountHdd();
 
   switch (GetFileSignature(path)) {
     case FileSignatureType::XEX0:
@@ -573,7 +700,13 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
     case FileSignatureType::XEX1:
     case FileSignatureType::XEX2:
     case FileSignatureType::ELF: {
-      mount_result = MountPath(path, "\\Device\\Harddisk0\\Partition1");
+      if (cvars::launch_xex_as_disc) {
+        return LaunchXexAsDisc(path);
+      }
+      const std::string_view mount_target =
+          cvars::mount_hdd ? "\\Device\\Game0"
+                           : "\\Device\\Harddisk0\\Partition1";
+      mount_result = MountPath(path, mount_target);
       return mount_result ? mount_result : LaunchXexFile(path);
     } break;
     case FileSignatureType::LIVE:
@@ -1698,6 +1831,10 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // Partition1 will go to this. Registering during CompleteLaunch allows us
   // to make sure any HostPathDevices are ready beforehand. (see comment above
   // cache:\ device registration for more info about why)
+  if (cvars::mount_hdd) {
+    MountHdd();
+  }
+
   auto null_paths = {std::string("\\Partition0"), std::string("\\Cache0"),
                      std::string("\\Cache1")};
   auto null_device =

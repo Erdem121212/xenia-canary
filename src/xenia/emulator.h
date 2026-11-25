@@ -114,6 +114,9 @@ class Emulator {
   // Folder files safe to remove without significant side effects are stored in.
   const std::filesystem::path& cache_root() const { return cache_root_; }
 
+  // Folder persistent host HDD (\Device\Harddisk0\Partition1) is stored in.
+  std::filesystem::path hdd_root() const;
+
   // Name of the title in the default language.
   const std::string& title_name() const { return title_name_; }
 
@@ -202,6 +205,19 @@ class Emulator {
 
   X_STATUS MountPath(const std::filesystem::path& path,
                      const std::string_view mount_path);
+
+  // Mounts the persistent host HDD directory at \Device\Harddisk0\Partition1.
+  bool MountHdd();
+
+  // Mounts a disc image, folder, or XEX directory at \Device\Cdrom0 (and odd:).
+  X_STATUS MountDiscPath(const std::filesystem::path& path);
+
+  // Launches a standalone .xex file mounted as an optical disc
+  // (\Device\Cdrom0).
+  X_STATUS LaunchXexAsDisc(const std::filesystem::path& path);
+
+  // Launches the configured separate dashboard .xex file.
+  X_STATUS LaunchDashboard();
 
   enum class FileSignatureType {
     XEX0,

@@ -118,6 +118,7 @@ class EmulatorWindow {
     ToggleLogging,
     IncTitleSelect,
     DecTitleSelect,
+    ReturnToDashboard,
     Unknown
   };
 
@@ -261,6 +262,11 @@ class EmulatorWindow {
   void OnMouseUp(const ui::MouseEvent& e);
   void FileOpen();
   void FileClose();
+  void LaunchDashboard();
+  void SetDashboardPath();
+  void OpenAsDisc();
+  void MountDiscForDashboard();
+  void SetHddDirectory();
   void InstallContent();
   void ExtractZarchive();
   void CreateZarchive();

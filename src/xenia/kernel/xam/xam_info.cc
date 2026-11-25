@@ -51,6 +51,8 @@ DEFINE_bool(staging_mode, 0,
             "Enables preview mode in dashboards to render debug information.",
             "Kernel");
 
+DECLARE_string(dashboard_path);
+
 namespace xe {
 namespace kernel {
 namespace xam {
@@ -476,6 +478,22 @@ dword_result_t XamLoaderGetLaunchData_entry(lpvoid_t buffer_ptr,
 }
 DECLARE_XAM_EXPORT1(XamLoaderGetLaunchData, kNone, kSketchy);
 
+static bool TryReturnToConfiguredDashboard(KernelState* kernel_state) {
+  if (cvars::dashboard_path.empty()) {
+    return false;
+  }
+  auto emulator = kernel_state->emulator();
+  auto display_window = emulator->display_window();
+  if (!display_window) {
+    return false;
+  }
+  display_window->app_context().CallInUIThread([emulator]() {
+    emulator->TerminateTitle();
+    emulator->LaunchDashboard();
+  });
+  return true;
+}
+
 void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
 
@@ -494,6 +512,9 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
         "Title closed with new launch data. \nPlease restart Xenia. "
         "Game will be loaded automatically.";
   } else {
+    if (TryReturnToConfiguredDashboard(kernel_state())) {
+      return;
+    }
     title = "Title terminated";
     message = "Game requested exit to dashboard.";
     assert_always("Game requested exit to dashboard via XamLoaderLaunchTitle");
@@ -527,6 +548,9 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
 DECLARE_XAM_EXPORT1(XamLoaderLaunchTitle, kNone, kSketchy);
 
 void XamLoaderTerminateTitle_entry() {
+  if (TryReturnToConfiguredDashboard(kernel_state())) {
+    return;
+  }
   std::string title = "Title terminated";
   std::string message = "Game requested exit to dashboard.";
   assert_always("Game requested exit to dashboard via XamLoaderTerminateTitle");
